@@ -1,0 +1,12 @@
+---
+commands:
+  - name: Docker Compose
+    command: docker compose up
+  - name: Frontend Dev
+    command: npm run dev
+    dir: ./frontend
+  - name: Python REPL
+    command: python3 -q
+  - name: ls
+    command: ls -lah
+    dir: ./
