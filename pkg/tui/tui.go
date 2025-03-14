@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -52,6 +53,11 @@ type commandFinishedMsg struct {
 	cmd    *Command
 }
 
+type (
+	logUpdateMsg    struct{}
+	statusUpdateMsg struct{ cmd *Command }
+)
+
 var (
 	sidebarStyle = lipgloss.NewStyle().
 			Width(20).
@@ -90,7 +96,6 @@ func (c *Command) Run() {
 	c.Mu.Lock()
 	defer c.Mu.Unlock()
 
-	// Create new command instance for reruns
 	c.Cmd = exec.Command("sh", "-c", c.CommandString)
 	if c.Dir != "" {
 		c.Cmd.Dir = c.Dir
@@ -104,7 +109,13 @@ func (c *Command) Run() {
 	}
 	c.Stdin = stdin
 
+	// Create scanner with buffer to prevent blocking
 	scanner := bufio.NewScanner(stdout)
+	const maxCapacity = 1024 * 1024
+	buf := make([]byte, maxCapacity)
+	scanner.Buffer(buf, maxCapacity)
+
+	// Real-time update loop
 	go func() {
 		for scanner.Scan() {
 			c.Mu.Lock()
@@ -113,11 +124,22 @@ func (c *Command) Run() {
 				c.Output = c.Output[1:]
 			}
 			c.Mu.Unlock()
+
+			// Send update after each line
+			if Program != nil {
+				Program.Send(logUpdateMsg{})
+			}
 		}
 	}()
 
 	c.Running = true
 	c.Finished = false
+
+	// Notify UI about status change
+	if Program != nil {
+		Program.Send(statusUpdateMsg{cmd: c})
+	}
+
 	if err := c.Cmd.Start(); err != nil {
 		c.Output = append(c.Output, "ERROR: "+err.Error())
 	}
@@ -145,19 +167,34 @@ func (c *Command) Run() {
 				output: c.Output,
 				cmd:    c,
 			})
+			Program.Send(statusUpdateMsg{cmd: c})
 		}
 	}()
 }
 
 func (m *Model) Init() tea.Cmd {
 	m.updateSortedIndices()
-	return nil
+	// Return a ticker to force periodic redraws (fallback)
+	return tea.Tick(time.Second/60, func(time.Time) tea.Msg {
+		return logUpdateMsg{}
+	})
 }
 
 func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	m.updateSortedIndices()
 
 	switch msg := msg.(type) {
+	case logUpdateMsg:
+		// Force redraw on log update
+		m.updateSortedIndices()
+		return m, tea.Tick(time.Second/60, func(time.Time) tea.Msg {
+			return logUpdateMsg{}
+		})
+
+	case statusUpdateMsg:
+		// Update sorting when command status changes
+		m.updateSortedIndices()
+		return m, nil
 	case commandFinishedMsg:
 		shouldExit := false
 		if msg.cmd.ExitCode != 0 {
@@ -271,6 +308,7 @@ func (m *Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ready = true
 	}
 
+	m.updateSortedIndices()
 	return m, nil
 }
 
